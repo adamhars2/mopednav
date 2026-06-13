@@ -6,6 +6,7 @@
   <title>MopedNav</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -255,10 +256,50 @@
       color: var(--blue);
     }
     .map-btn:hover { background: #fff; }
-    #locate-btn { right: 12px; bottom: 100px; }
-    #zoom-in    { right: 12px; bottom: 200px; }
-    #zoom-out   { right: 12px; bottom: 152px; }
+    #locate-btn  { right: 12px; bottom: 100px; }
+    #zoom-in     { right: 12px; bottom: 200px; }
+    #zoom-out    { right: 12px; bottom: 152px; }
+    #compass-btn { right: 12px; bottom: 256px; }
     #zoom-in, #zoom-out { font-size: 22px; font-weight: 300; color: var(--blue); }
+    #compass-btn svg { display: block; transition: transform 0.3s ease; }
+    #compass-btn.north-up { opacity: 0.45; }
+
+    /* ─── FAVORITES ──────────────────────────────────── */
+    .fav-header {
+      padding: 8px 14px 4px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--gray1);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .fav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 9px 14px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--gray5);
+      transition: background 0.1s;
+    }
+    .fav-item:last-child { border-bottom: none; }
+    .fav-item:hover { background: var(--gray6); }
+    .fav-icon {
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      background: rgba(255,149,0,0.12);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; flex-shrink: 0;
+    }
+    .fav-text { flex: 1; }
+    .fav-name   { font-size: 14px; font-weight: 500; color: var(--text); }
+    .fav-detail { font-size: 12px; color: var(--gray1); margin-top: 1px; }
+    .fav-del {
+      background: none; border: none; cursor: pointer;
+      color: var(--gray3); font-size: 17px; padding: 4px;
+      line-height: 1; flex-shrink: 0;
+    }
+    .fav-del:hover { color: var(--red); }
 
     /* ─── BOTTOM SHEET ───────────────────────────────── */
     #sheet {
@@ -368,6 +409,14 @@
     }
     .share-big-btn:hover  { background: var(--blue-dark); }
     .share-big-btn:active { transform: scale(0.97); }
+    #save-fav-btn {
+      background: var(--orange);
+      font-size: 20px;
+      padding: 15px 16px;
+      box-shadow: 0 3px 12px rgba(255,149,0,0.3);
+      min-width: 52px;
+    }
+    #save-fav-btn:hover { background: #e08500; }
 
     /* Action buttons */
     .sheet-actions {
@@ -523,6 +572,7 @@
     body.navigating #locate-btn   { display: none; }
     body.navigating #zoom-in      { bottom: 152px; }
     body.navigating #zoom-out     { bottom: 104px; }
+    body.navigating #compass-btn  { bottom: 208px; }
 
     /* Next-turn banner (top) */
     #nav-top {
@@ -732,6 +782,17 @@
 <button class="map-btn" id="locate-btn" title="Min plats">⊙</button>
 <button class="map-btn" id="zoom-in"  onclick="map.zoomIn()">+</button>
 <button class="map-btn" id="zoom-out" onclick="map.zoomOut()">−</button>
+<button class="map-btn north-up" id="compass-btn" title="Återställ norr / Heading-up">
+  <svg width="26" height="26" viewBox="0 0 26 26" id="compass-svg">
+    <circle cx="13" cy="13" r="11" fill="none" stroke="#C7C7CC" stroke-width="1.2"/>
+    <!-- North arrow (red) -->
+    <polygon points="13,3 10.5,14 13,12.5 15.5,14" fill="#FF3B30"/>
+    <!-- South arrow (gray) -->
+    <polygon points="13,23 10.5,12 13,13.5 15.5,12" fill="#C7C7CC"/>
+    <!-- Center dot -->
+    <circle cx="13" cy="13" r="1.5" fill="#8E8E93"/>
+  </svg>
+</button>
 
 <!-- NAV TOP (next turn) -->
 <div id="nav-top">
@@ -789,9 +850,10 @@
       <div class="route-meta" id="route-meta"></div>
     </div>
 
-    <!-- Primary action buttons — both always visible -->
+    <!-- Primary action buttons — all always visible -->
     <div class="primary-actions">
       <button class="start-btn">▶ Starta navigation</button>
+      <button class="share-big-btn" id="save-fav-btn">★</button>
       <button class="share-big-btn" id="share-btn">📤 Dela rutt</button>
     </div>
 
@@ -823,7 +885,7 @@
 
 <script>
 // ── MAP ───────────────────────────────────────────────
-const map = L.map('map', { zoomControl:false, attributionControl:true })
+const map = L.map('map', { zoomControl:false, attributionControl:true, rotate:true, rotateControl:false })
               .setView([59.33, 18.07], 13);
 
 // Apple Maps-like tile layer (light, clean roads)
@@ -910,10 +972,17 @@ async function reverseGeocode(lat,lon) {
 // ── AUTOCOMPLETE ──────────────────────────────────────
 let dTimer=null;
 function setupSuggest(inputEl, sugEl, onPick) {
+  inputEl.addEventListener('focus', ()=>{
+    if(!inputEl.value.trim()) renderFavSuggestions(sugEl, onPick);
+  });
   inputEl.addEventListener('input', ()=>{
     clearTimeout(dTimer);
     const q=inputEl.value.trim();
-    if(q.length<3){sugEl.style.display='none';return;}
+    if(q.length<3){
+      if(!q) renderFavSuggestions(sugEl, onPick);
+      else sugEl.style.display='none';
+      return;
+    }
     dTimer=setTimeout(async()=>{
       const results=await geocode(q);
       if(!results.length){sugEl.style.display='none';return;}
@@ -1294,6 +1363,7 @@ let navStartTime = null;
 let navTotalDist = 0;
 let navRemain    = 0;
 let mapFollowing = true;   // map re-centers on each GPS update
+let headingUp    = true;   // rotate map to match travel direction during navigation
 
 // GPS dot icon
 const gpsDotIcon = L.divIcon({
@@ -1308,6 +1378,104 @@ function haversine(a, b) {
   const s=Math.sin(dLat/2)**2+Math.cos(toR(a[0]))*Math.cos(toR(b[0]))*Math.sin(dLon/2)**2;
   return R*2*Math.atan2(Math.sqrt(s),Math.sqrt(1-s));
 }
+
+// Bearing (degrees, clockwise from north) from point a → b
+function calcBearing(a, b) {
+  const toR=d=>d*Math.PI/180;
+  const lat1=toR(a[0]), lat2=toR(b[0]), dLon=toR(b[1]-a[1]);
+  const y=Math.sin(dLon)*Math.cos(lat2);
+  const x=Math.cos(lat1)*Math.sin(lat2)-Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+  return (Math.atan2(y,x)*180/Math.PI+360)%360;
+}
+
+// ── COMPASS ───────────────────────────────────────────
+function updateCompass(bearing) {
+  const svg=document.getElementById('compass-svg');
+  if(svg) svg.style.transform=`rotate(${-bearing}deg)`;
+  const btn=document.getElementById('compass-btn');
+  if(btn) btn.classList.toggle('north-up', Math.abs(bearing)<1);
+}
+
+function setBearing(deg) {
+  if(map.setBearing) map.setBearing(deg);
+  updateCompass(deg);
+}
+
+// Update compass as map rotates (also catches manual two-finger rotation)
+map.on('rotate', ()=>{ updateCompass(map.getBearing?map.getBearing():0); });
+
+document.getElementById('compass-btn').addEventListener('click', ()=>{
+  setBearing(0);
+  headingUp=false; // user explicitly reset — pause auto-rotate
+});
+
+// ── FAVORITES ─────────────────────────────────────────
+const FAV_KEY='mopednav_favs';
+function loadFavs()  { try { return JSON.parse(localStorage.getItem(FAV_KEY)||'[]'); } catch{return[];} }
+function saveFavs(f) { try { localStorage.setItem(FAV_KEY,JSON.stringify(f)); } catch{} }
+
+function renderFavSuggestions(sugEl, onPick) {
+  const favs=loadFavs();
+  if(!favs.length) { sugEl.style.display='none'; return; }
+  sugEl.innerHTML=`<div class="fav-header">Favoriter</div>`+favs.map((f,i)=>`
+    <div class="fav-item" data-i="${i}">
+      <div class="fav-icon">⭐</div>
+      <div class="fav-text">
+        <div class="fav-name">${f.name}</div>
+        <div class="fav-detail">${f.from.label} → ${f.to.label}</div>
+      </div>
+      <button class="fav-del" data-del="${i}" title="Ta bort">✕</button>
+    </div>
+  `).join('');
+  sugEl.style.display='block';
+
+  sugEl.querySelectorAll('.fav-item').forEach((el,i)=>{
+    el.addEventListener('mousedown', e=>{
+      if(e.target.closest('.fav-del')) return; // handled separately
+      e.preventDefault();
+      const f=favs[i];
+      // Fill both fields and trigger route
+      fromCoords=f.from.coords; toCoords=f.to.coords;
+      setClass(f.cls||1);
+      document.getElementById('from-input').value=f.from.label;
+      document.getElementById('to-input').value=f.to.label;
+      setMarker('from',fromCoords); setMarker('to',toCoords);
+      sugEl.style.display='none';
+      checkReady();
+      setTimeout(()=>document.getElementById('go-btn').click(),50);
+    });
+  });
+  sugEl.querySelectorAll('.fav-del').forEach(btn=>{
+    btn.addEventListener('mousedown', e=>{
+      e.preventDefault(); e.stopPropagation();
+      const i=parseInt(btn.dataset.del);
+      const favs2=loadFavs(); favs2.splice(i,1); saveFavs(favs2);
+      renderFavSuggestions(sugEl, onPick);
+    });
+  });
+}
+
+document.getElementById('save-fav-btn').addEventListener('click', ()=>{
+  if(!fromCoords||!toCoords) return;
+  const fl=document.getElementById('from-input').value||'Start';
+  const tl=document.getElementById('to-input').value||'Mål';
+  const name=`${fl.split(',')[0]} → ${tl.split(',')[0]}`;
+  const favs=loadFavs();
+  // Avoid exact duplicates
+  if(favs.some(f=>f.from.label===fl&&f.to.label===tl)) {
+    const btn=document.getElementById('save-fav-btn');
+    btn.textContent='✅'; setTimeout(()=>{ btn.textContent='★'; },2000);
+    return;
+  }
+  favs.unshift({ id:Date.now(), name, cls:mopedClass,
+    from:{ coords:fromCoords, label:fl },
+    to:  { coords:toCoords,   label:tl }
+  });
+  if(favs.length>10) favs.length=10; // max 10
+  saveFavs(favs);
+  const btn=document.getElementById('save-fav-btn');
+  btn.textContent='⭐'; setTimeout(()=>{ btn.textContent='★'; },2000);
+});
 
 function nearestStepIdx(pos) {
   // Find the step we are closest to completing (nearest step end-point ahead)
@@ -1333,7 +1501,7 @@ function updateNavHUD(pos, speedMs) {
   // ── Accuracy circle ──
   if(gpsAccCircle) map.removeLayer(gpsAccCircle);
 
-  // ── Follow map ──
+  // ── Follow map + rotate ──
   if(mapFollowing) {
     map.setView(pos, Math.max(map.getZoom(),15), {animate:true, duration:0.5});
   }
@@ -1396,9 +1564,13 @@ function startNavigation() {
 
   document.body.classList.add('navigating');
 
+  headingUp=true;
   watchId=navigator.geolocation.watchPosition(
     pos=>{
-      const {latitude:lat, longitude:lon, speed} = pos.coords;
+      const {latitude:lat, longitude:lon, speed, heading} = pos.coords;
+      if(headingUp && heading!=null && !isNaN(heading)) {
+        setBearing(heading);
+      }
       updateNavHUD([lat,lon], speed);
     },
     err=>{
@@ -1415,16 +1587,20 @@ function simulateNavigation() {
   const coords=window._navCoords||[];
   if(!coords.length) return;
   let i=0;
+  const step=Math.max(1,Math.floor(coords.length/120));
   const interval=setInterval(()=>{
     if(!document.body.classList.contains('navigating')||i>=coords.length-1){
       clearInterval(interval);
       return;
     }
     const pos=coords[i];
-    // Simulate ~40 km/h
-    const speed=40/3.6;
-    updateNavHUD(pos, speed);
-    i+=Math.max(1,Math.floor(coords.length/120)); // ~120 steps total
+    const next=coords[Math.min(i+step,coords.length-1)];
+    // Rotate map to direction of travel in simulation
+    if(headingUp && next && (next[0]!==pos[0]||next[1]!==pos[1])) {
+      setBearing(calcBearing(pos,next));
+    }
+    updateNavHUD(pos, 40/3.6);
+    i+=step;
   },1000);
   window._simInterval=interval;
 }
@@ -1435,6 +1611,8 @@ function stopNavigation() {
   document.body.classList.remove('navigating');
   if(gpsDot){ map.removeLayer(gpsDot); gpsDot=null; }
   if(gpsAccCircle){ map.removeLayer(gpsAccCircle); gpsAccCircle=null; }
+  setBearing(0); // reset to north-up
+  headingUp=false;
   // Re-show sheet
   document.getElementById('sheet').className='peek';
 }
